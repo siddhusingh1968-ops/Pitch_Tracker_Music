@@ -3,18 +3,18 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
-<title>Chromatic Tuner & Pitch Contour Tracker</title>
+<title>Svara Pitch Tracker & Tuner</title>
 
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="Tuner" />
+<meta name="apple-mobile-web-app-title" content="Svara Tracker" />
 <meta name="theme-color" content="#0a0d14" />
 
 <link rel="apple-touch-icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect width='180' height='180' rx='40' fill='%230a0d14'/><g fill='none' stroke='%23a8d8a8' stroke-width='8' stroke-linecap='round'><line x1='70' y1='40' x2='70' y2='100'/><line x1='110' y1='40' x2='110' y2='100'/><path d='M70 100 Q90 120 90 135 L90 150'/><path d='M110 100 Q90 120 90 135'/></g></svg>" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -53,12 +53,30 @@ const { useState, useEffect, useRef } = React;
 const NOTE_SHARPS = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const NOTE_FLATS  = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"];
 
+// Hindustani Swara Definitions (0 to 12 Semitones spanning an octave)
+const SWARAS = [
+  { shorthand: "S",  label: "Shadja (Sa)", semitone: 0 },
+  { shorthand: "r",  label: "Komal Rishabh (re)", semitone: 1 },
+  { shorthand: "R",  label: "Shuddha Rishabh (Re)", semitone: 2 },
+  { shorthand: "g",  label: "Komal Gandhar (ga)", semitone: 3 },
+  { shorthand: "G",  label: "Shuddha Gandhar (Ga)", semitone: 4 },
+  { shorthand: "m",  label: "Shuddha Madhyam (ma)", semitone: 5 },
+  { shorthand: "M",  label: "Teevra Madhyam (Ma)", semitone: 6 },
+  { shorthand: "P",  label: "Pancham (Pa)", semitone: 7 },
+  { shorthand: "d",  label: "Komal Dhaivat (dha)", semitone: 8 },
+  { shorthand: "D",  label: "Shuddha Dhaivat (Dha)", semitone: 9 },
+  { shorthand: "n",  label: "Komal Nishad (ni)", semitone: 10 },
+  { shorthand: "N",  label: "Shuddha Nishad (Ni)", semitone: 11 },
+  { shorthand: "S'", label: "Tar Shadja (Sa)", semitone: 12 }
+];
+
 const INSTRUMENTS = [
   { id: "concert", label: "Concert pitch (C)", semitones: 0 },
-  { id: "bb", label: "B♭ instrument", semitones: 2 },
-  { id: "eb", label: "E♭ instrument", semitones: 9 },
-  { id: "f", label: "F instrument", semitones: 7 },
-  { id: "guitar", label: "Guitar (sounds 8va below)", semitones: -12 },
+  { id: "bb", label: "B♭ instrument (trumpet, clarinet, tenor sax)", semitones: 2 },
+  { id: "eb", label: "E♭ instrument (alto sax, alto clarinet)", semitones: 9 },
+  { id: "f", label: "F instrument (French horn, English horn)", semitones: 7 },
+  { id: "bb_bass", label: "B♭ bass (bass clarinet, tenor sax 8va)", semitones: 14 },
+  { id: "guitar", label: "Guitar (sounds 8va below written)", semitones: -12 },
 ];
 
 function freqToNote(freq, a4 = 440, useFlats = false, transposeSemitones = 0) {
@@ -87,7 +105,7 @@ function autoCorrelate(buf, sampleRate) {
   let rms = 0;
   for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / SIZE);
-  if (rms < 0.003) return -1; // Audio gate for floor noise
+  if (rms < 0.003) return -1;
 
   let r1 = 0, r2 = SIZE - 1;
   const thres = 0.05;
@@ -108,7 +126,7 @@ function autoCorrelate(buf, sampleRate) {
     let corr = 0;
     const limit = n - lag;
     for (let j = 0; j < limit; j++) corr += trimmed[j] * trimmed[j + lag];
-    corr = corr / limit; 
+    corr = corr / limit;
 
     if (!foundDip) {
       if (corr < prevCorr) foundDip = true;
@@ -176,10 +194,16 @@ const labelStyle = {
 };
 
 function Tuner() {
+  const [activeTab, setActiveTab] = useState("tracker"); // "tracker" or "classic"
   const [a4, setA4] = useState(440);
   const [useFlats, setUseFlats] = useState(false);
   const [instrument, setInstrument] = useState("concert");
   const [showSettings, setShowSettings] = useState(false);
+  const [showTonicConfig, setShowTonicConfig] = useState(false);
+
+  // Tonic Calibration State (Default to C#3 roughly 138.59 Hz)
+  const [tonicNote, setTonicNote] = useState("C#");
+  const [tonicOctave, setTonicOctave] = useState(3);
 
   const [refPlaying, setRefPlaying] = useState(false);
   const [refNote, setRefNote] = useState("A");
@@ -190,6 +214,7 @@ function Tuner() {
   const [reading, setReading] = useState(null);
   const [smoothCents, setSmoothCents] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [currentSwaraIdx, setCurrentSwaraIdx] = useState(null);
 
   const audioCtxRef = useRef(null);
   const analyserRef = useRef(null);
@@ -197,18 +222,15 @@ function Tuner() {
   const streamRef = useRef(null);
   const bufferRef = useRef(null);
   const recentFreqsRef = useRef([]);
-  
-  // High-performance canvas layout configurations
   const canvasRef = useRef(null);
-  const maxHistoryPoints = 400;
-  const pitchHistoryRef = useRef(new Array(maxHistoryPoints).fill(null));
-  const centerMidiRef = useRef(60); // Starts at middle C (MIDI 60)
+  const historyRef = useRef([]); // Stores scrolling pitch line array
 
   const refOscRef = useRef(null);
   const refGainRef = useRef(null);
   const refCtxRef = useRef(null);
 
   const transposeSemitones = INSTRUMENTS.find((i) => i.id === instrument)?.semitones ?? 0;
+  const tonicFreq = noteToFreq(tonicNote, tonicOctave, a4) || 138.59;
 
   async function start() {
     try {
@@ -217,9 +239,14 @@ function Tuner() {
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: true,
+          autoGainControl: false,
           sampleRate: 48000,
           channelCount: 1,
+          googEchoCancellation: false,
+          googAutoGainControl: false,
+          googNoiseSuppression: false,
+          googHighpassFilter: false,
+          googTypingNoiseDetection: false,
         },
       };
       let stream;
@@ -235,18 +262,17 @@ function Tuner() {
       if (ctx.state === "suspended") {
         try { await ctx.resume(); } catch (e) {}
       }
-      
       const source = ctx.createMediaStreamSource(stream);
+      const gain = ctx.createGain();
+      gain.gain.value = 25;
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
-      
-      // Removed the excessive 25x gain stage to stop audio clipping distortion
-      source.connect(analyser);
-      
+      source.connect(gain);
+      gain.connect(analyser);
       analyserRef.current = analyser;
       bufferRef.current = new Float32Array(analyser.fftSize);
-      pitchHistoryRef.current = new Array(maxHistoryPoints).fill(null);
       setRunning(true);
+      tick();
     } catch (e) {
       setError((e && e.message) || "Could not access microphone.");
       setRunning(false);
@@ -268,172 +294,131 @@ function Tuner() {
     analyserRef.current = null;
     setReading(null);
     setSmoothCents(0);
+    setCurrentSwaraIdx(null);
     recentFreqsRef.current = [];
+    historyRef.current = [];
   }
 
-  // Draw timeline interface function
-  function drawPitchTimeline() {
+  function tick() {
+    const analyser = analyserRef.current;
+    const ctx = audioCtxRef.current;
+    const buf = bufferRef.current;
+    if (!analyser || !ctx) return;
+    analyser.getFloatTimeDomainData(buf);
+
+    let peak = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const v = Math.abs(buf[i]);
+      if (v > peak) peak = v;
+    }
+    setAudioLevel(peak);
+
+    const freq = autoCorrelate(buf, ctx.sampleRate);
+    let deltaSemitones = null;
+
+    if (freq > 0 && freq < 4000) {
+      const recent = recentFreqsRef.current;
+
+      if (recent.length >= 2) {
+        const sortedPrev = [...recent].sort((a, b) => a - b);
+        const prevMedian = sortedPrev[Math.floor(sortedPrev.length / 2)];
+        const ratio = freq / prevMedian;
+        if (ratio > 1.0176 || ratio < 0.9827) {
+          recent.length = 0;
+        }
+      }
+
+      recent.push(freq);
+      if (recent.length > 3) recent.shift();
+      const sorted = [...recent].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      const r = freqToNote(median, a4, useFlats, transposeSemitones);
+      if (r) {
+        setReading(r);
+        setSmoothCents((prev) => prev + (r.cents - prev) * 0.4);
+
+        // Compute relative Swara interval position (0 to 12 range)
+        deltaSemitones = 12 * Math.log2(median / tonicFreq);
+        
+        // Dynamic octave wrapping/clamping to target visual grid layout
+        while (deltaSemitones < -0.5) deltaSemitones += 12;
+        while (deltaSemitones > 12.5) deltaSemitones -= 12;
+        
+        const matchedIdx = Math.max(0, Math.min(12, Math.round(deltaSemitones)));
+        setCurrentSwaraIdx(matchedIdx);
+      }
+    } else {
+      setCurrentSwaraIdx(null);
+    }
+
+    // Capture scrolling line buffer coordinate trace
+    const history = historyRef.current;
+    history.push(deltaSemitones);
+    if (history.length > 450) history.shift();
+
+    drawTrackerCanvas();
+    rafRef.current = requestAnimationFrame(tick);
+  }
+
+  function drawTrackerCanvas() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
-    const w = canvas.width;
-    const h = canvas.height;
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
 
-    // Background clearing
-    ctx.fillStyle = "#0a0d14";
-    ctx.fillRect(0, 0, w, h);
-
-    const history = pitchHistoryRef.current;
-    
-    // Smoothly calculate target centering box around active audio signals
-    let latestMidi = null;
-    for (let i = history.length - 1; i >= 0; i--) {
-      if (history[i] !== null) {
-        latestMidi = 69 + 12 * Math.log2(history[i] / a4);
-        break;
-      }
-    }
-    if (latestMidi !== null) {
-      centerMidiRef.current += (latestMidi - centerMidiRef.current) * 0.05;
-    }
-
-    const centerMidi = centerMidiRef.current;
-    const semitoneViewWindow = 8; // Zoom view context level (+/- 8 semitones out from center)
-
-    // Draw horizontal note alignment grid lanes
-    const startMidi = Math.ceil(centerMidi - semitoneViewWindow);
-    const endMidi = Math.floor(centerMidi + semitoneViewWindow);
-    const labelMarginLeft = 45;
-
-    ctx.font = "10px 'JetBrains Mono', monospace";
-    for (let m = startMidi; m <= endMidi; m++) {
-      const diff = m - centerMidi;
-      const y = h / 2 - (diff / semitoneViewWindow) * (h / 2);
-
-      const isC = m % 12 === 0;
-      ctx.strokeStyle = isC ? "rgba(168, 216, 168, 0.15)" : "rgba(255, 255, 255, 0.03)";
-      ctx.lineWidth = isC ? 1.5 : 1;
-      
+    // Render underlying visual calibration grids
+    for (let i = 0; i <= 12; i++) {
+      const y = H - (i / 12) * H;
       ctx.beginPath();
-      ctx.moveTo(labelMarginLeft, y);
-      ctx.lineTo(w, y);
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.strokeStyle = i === 0 || i === 7 || i === 12 ? "rgba(168,216,168,0.25)" : "rgba(255,255,255,0.04)";
+      ctx.lineWidth = i === 0 || i === 7 || i === 12 ? 1.5 : 1;
       ctx.stroke();
-
-      const names = useFlats ? NOTE_FLATS : NOTE_SHARPS;
-      const noteName = names[((m % 12) + 12) % 12];
-      const octave = Math.floor(m / 12) - 1;
-      
-      ctx.fillStyle = isC ? "#a8d8a8" : "#5a5448";
-      ctx.fillText(`${noteName}${octave}`, 8, y + 4);
     }
 
-    // Render the continuous pitch contour line trace path
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = "#a8d8a8";
-    ctx.shadowBlur = 8;
-    ctx.shadowColor = "rgba(168, 216, 168, 0.4)";
-    ctx.lineCap = "round";
-    ctx.lineJoin = "round";
-    
+    // Render historical real-time pitch contour line
+    const history = historyRef.current;
+    if (history.length < 2) return;
+
     ctx.beginPath();
-    let isDrawing = false;
+    let drawing = false;
 
     for (let i = 0; i < history.length; i++) {
-      const freq = history[i];
-      const x = labelMarginLeft + (i / (maxHistoryPoints - 1)) * (w - labelMarginLeft);
+      const val = history[i];
+      const x = (i / 450) * W;
 
-      if (freq === null || freq <= 0) {
-        isDrawing = false;
-        continue;
-      }
-
-      const midiVal = 69 + 12 * Math.log2(freq / a4);
-      const diff = midiVal - centerMidi;
-      const y = h / 2 - (diff / semitoneViewWindow) * (h / 2);
-
-      if (y < 0 || y > h) {
-        isDrawing = false;
-        continue;
-      }
-
-      if (!isDrawing) {
-        ctx.moveTo(x, y);
-        isDrawing = true;
+      if (val !== null && val >= 0 && val <= 12) {
+        const y = H - (val / 12) * H;
+        if (!drawing) {
+          ctx.moveTo(x, y);
+          drawing = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
       } else {
-        ctx.lineTo(x, y);
+        if (drawing) {
+          ctx.strokeStyle = "#a8d8a8";
+          ctx.lineWidth = 3;
+          ctx.shadowBlur = 8;
+          ctx.shadowColor = "rgba(168,216,168,0.5)";
+          ctx.stroke();
+          ctx.beginPath();
+          drawing = false;
+        }
       }
     }
-    ctx.stroke();
-    ctx.shadowBlur = 0; // Reset canvas context matrix state
+    if (drawing) {
+      ctx.strokeStyle = "#a8d8a8";
+      ctx.lineWidth = 3;
+      ctx.shadowBlur = 8;
+      ctx.shadowColor = "rgba(168,216,168,0.5)";
+      ctx.stroke();
+    }
+    ctx.shadowBlur = 0; // reset
   }
-
-  // Safe continuous tracking loop hook 
-  useEffect(() => {
-    if (!running) return;
-
-    function tick() {
-      const analyser = analyserRef.current;
-      const ctx = audioCtxRef.current;
-      const buf = bufferRef.current;
-      if (!analyser || !ctx || !buf) {
-        rafRef.current = requestAnimationFrame(tick);
-        return;
-      }
-      
-      analyser.getFloatTimeDomainData(buf);
-
-      let peak = 0;
-      for (let i = 0; i < buf.length; i++) {
-        const v = Math.abs(buf[i]);
-        if (v > peak) peak = v;
-      }
-      setAudioLevel(peak);
-
-      const freq = autoCorrelate(buf, ctx.sampleRate);
-      const history = pitchHistoryRef.current;
-
-      if (freq > 50 && freq < 2000) {
-        const recent = recentFreqsRef.current;
-        if (recent.length >= 2) {
-          const sortedPrev = [...recent].sort((a, b) => a - b);
-          const prevMedian = sortedPrev[Math.floor(sortedPrev.length / 2)];
-          const ratio = freq / prevMedian;
-          if (ratio > 1.0176 || ratio < 0.9827) {
-            recent.length = 0;
-          }
-        }
-
-        recent.push(freq);
-        if (recent.length > 3) recent.shift();
-        const sorted = [...recent].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        
-        const r = freqToNote(median, a4, useFlats, transposeSemitones);
-        if (r) {
-          setReading(r);
-          setSmoothCents((prev) => prev + (r.cents - prev) * 0.3);
-        }
-        history.push(median);
-      } else {
-        if (peak < 0.002) {
-          setReading(null);
-        }
-        history.push(null);
-      }
-
-      if (history.length > maxHistoryPoints) {
-        history.shift();
-      }
-
-      drawPitchTimeline();
-      rafRef.current = requestAnimationFrame(tick);
-    }
-
-    rafRef.current = requestAnimationFrame(tick);
-    return () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, [running, a4, useFlats, transposeSemitones]);
 
   function playReference() {
     stopReference();
@@ -486,8 +471,19 @@ function Tuner() {
   }, []);
 
   useEffect(() => {
+    if (reading) {
+      const r = freqToNote(reading.freq, a4, useFlats, transposeSemitones);
+      if (r) setReading(r);
+    }
+  }, [a4, useFlats, transposeSemitones]);
+
+  useEffect(() => {
     if (refPlaying) playReference();
   }, [refNote, refOctave, a4]);
+
+  useEffect(() => {
+    if (!running) drawTrackerCanvas();
+  }, [tonicNote, tonicOctave]);
 
   const cents = reading ? smoothCents : 0;
   const inTune = reading && Math.abs(reading.cents) <= 5;
@@ -508,161 +504,326 @@ function Tuner() {
       flexDirection: "column",
       alignItems: "center",
     }}>
-      <div style={{ width: "100%", maxWidth: 560 }}>
-        <div style={{ textAlign: "center", marginBottom: 24 }}>
+      <div style={{ width: "100%", maxWidth: 600 }}>
+        
+        {/* Header Block */}
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
           <div style={{
-            fontSize: 11,
+            fontSize: 14,
             letterSpacing: "0.4em",
-            color: "#8a8478",
+            color: "#a8d8a8",
             textTransform: "uppercase",
             marginBottom: 6,
+            fontWeight: 400
           }}>
-            Chromatic Tuner & Pitch Tracker
+            Svara Pitch Tracker
           </div>
           <div style={{
             fontFamily: "'JetBrains Mono', monospace",
             fontSize: 10,
-            color: "#5a5448",
-            letterSpacing: "0.2em",
+            color: "#8a8478",
+            letterSpacing: "0.15em",
           }}>
-            A4 = {a4} Hz · ±5¢ tolerance · {instrumentLabel.split(" ")[0]}
+            Tonic Sa = {tonicNote}{tonicOctave} ({tonicFreq.toFixed(1)} Hz)
           </div>
         </div>
 
+        {/* Dynamic Mode Switch Tabs */}
+        <div style={{
+          display: "flex",
+          width: "100%",
+          background: "rgba(20,24,31,0.6)",
+          border: "1px solid #2a2f3a",
+          borderRadius: 4,
+          padding: 4,
+          marginBottom: 20
+        }}>
+          <button 
+            onClick={() => setActiveTab("tracker")}
+            style={{
+              flex: 1,
+              background: activeTab === "tracker" ? "#1f2535" : "transparent",
+              border: "none",
+              color: activeTab === "tracker" ? "#a8d8a8" : "#6a6458",
+              padding: "10px",
+              fontSize: 11,
+              letterSpacing: "0.15em",
+              textTransform: "uppercase",
+              fontFamily: "'JetBrains Mono', monospace",
+              cursor: "pointer",
+              borderRadius: 2,
+              transition: "all 200ms ease"
+            }}
+          >
+            Vocal Pitch Tracker
+          </button>
+          <button 
+            onClick={() => setActiveTab("classic")}
+            style={{
+              flex: 1,
+              background: activeTab === "classic" ? "#1f2535" : "transparent",
+              border: "none",
+              color: activeTab === "classic" ? "#a8d8a8" : "#6a6458",
+              padding: "10px",
+              fontSize: 11,
+              letterSpacing: "0.15em",
+              textTransform: "uppercase",
+              fontFamily: "'JetBrains Mono', monospace",
+              cursor: "pointer",
+              borderRadius: 2,
+              transition: "all 200ms ease"
+            }}
+          >
+            Classic Meter View
+          </button>
+        </div>
+
+        {/* Panel Container */}
         <div style={{
           background: "linear-gradient(180deg, #14181f 0%, #0c0f15 100%)",
           border: "1px solid #2a2f3a",
           borderRadius: 4,
-          padding: "32px 24px 24px",
+          padding: "24px 20px 20px",
           boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04), 0 20px 60px rgba(0,0,0,0.5)",
+          position: "relative"
         }}>
-          <div style={{
-            textAlign: "center",
-            minHeight: 180,
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            justifyContent: "center",
-          }}>
-            {reading ? (
-              <>
-                <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
-                  <span style={{
-                    fontSize: 144,
-                    lineHeight: 1,
-                    fontWeight: 300,
-                    letterSpacing: "-0.04em",
-                    color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1",
-                    transition: "color 200ms ease",
-                    textShadow: inTune ? "0 0 30px rgba(168,216,168,0.4)" : "none",
-                  }}>
-                    {reading.note.replace(/[#b]/, "")}
-                  </span>
-                  {reading.note.includes("#") && (
-                    <span style={{ fontSize: 72, lineHeight: 1, fontWeight: 300, color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1" }}>♯</span>
-                  )}
-                  {reading.note.includes("b") && (
-                    <span style={{ fontSize: 72, lineHeight: 1, fontWeight: 300, color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1" }}>♭</span>
-                  )}
-                  <span style={{ fontSize: 32, color: "#5a5448", fontWeight: 300, marginLeft: 8 }}>
-                    {reading.octave}
-                  </span>
-                </div>
-                <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#6a6458", letterSpacing: "0.1em", marginTop: 8 }}>
-                  {reading.freq.toFixed(2)} Hz
-                </div>
-              </>
-            ) : (
-              <div style={{ fontSize: 22, color: "#4a4438", fontStyle: "italic", letterSpacing: "0.05em" }}>
-                {running ? "listening…" : "press start to begin"}
-              </div>
-            )}
-          </div>
-
-          <div style={{ marginTop: 24, position: "relative" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#5a5448", marginBottom: 6, letterSpacing: "0.05em" }}>
-              <span>−50</span><span>−25</span>
-              <span style={{ color: "#a8d8a8" }}>0</span>
-              <span>+25</span><span>+50</span>
-            </div>
-            <div style={{ position: "relative", height: 60, background: "#0a0d14", borderRadius: 2, border: "1px solid #1f242e", overflow: "hidden" }}>
-              <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(168,216,168,0.3)" }} />
-              {[-40, -30, -20, -10, 10, 20, 30, 40].map((v) => (
-                <div key={v} style={{ position: "absolute", left: `${50 + v}%`, top: 8, bottom: 8, width: 1, background: "rgba(255,255,255,0.06)" }} />
-              ))}
-              {reading && (
+          
+          {activeTab === "tracker" ? (
+            /* VOCAL PITCH TRACKER VIEW */
+            <div>
+              <div style={{ 
+                display: "flex", 
+                height: 360, 
+                position: "relative",
+                background: "#07090e",
+                border: "1px solid #1f242e",
+                borderRadius: 2,
+                overflow: "hidden"
+              }}>
+                
+                {/* Left Y-Axis Shorthand Column Sidebar */}
                 <div style={{
-                  position: "absolute",
-                  left: `${50 + needleAngle}%`,
-                  top: 4, bottom: 4, width: 2,
-                  transform: "translateX(-50%)",
-                  background: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080",
-                  boxShadow: inTune ? "0 0 12px rgba(168,216,168,0.6)" : "none",
-                  transition: "left 80ms ease-out",
-                }} />
-              )}
-            </div>
-            <div style={{
-              textAlign: "center",
-              marginTop: 10,
-              fontFamily: "'JetBrains Mono', monospace",
-              fontSize: 13,
-              color: reading ? (inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080") : "#3a3428",
-              letterSpacing: "0.1em",
-              minHeight: 18,
-            }}>
-              {reading ? `${reading.cents > 0 ? "+" : ""}${reading.cents} cents` : "—"}
-            </div>
-
-            {/* REAL-TIME SCROLLING PITCH CONTOUR TRACKER */}
-            <div style={{ marginTop: 28 }}>
-              <div style={labelStyle}>Real-Time Pitch Contour Tracker</div>
-              <div style={{ position: "relative", height: 180, background: "#0a0d14", borderRadius: 2, border: "1px solid #1f242e", overflow: "hidden" }}>
-                <canvas 
-                  ref={canvasRef} 
-                  width={512} 
-                  height={180} 
-                  style={{ width: "100%", height: "100%", display: "block" }} 
-                />
-              </div>
-            </div>
-
-            {running && (
-              <div style={{ marginTop: 16 }}>
-                <div style={{
-                  fontFamily: "'JetBrains Mono', monospace",
-                  fontSize: 9,
-                  color: "#5a5448",
-                  letterSpacing: "0.2em",
-                  textAlign: "center",
-                  marginBottom: 4,
+                  width: 40,
+                  display: "flex",
+                  flexDirection: "column-reverse",
+                  justifyContent: "space-between",
+                  alignItems: "stretch",
+                  background: "#10141d",
+                  borderRight: "1px solid #1f242e",
+                  zIndex: 2
                 }}>
-                  Mic audio input level
+                  {SWARAS.map((sw, idx) => {
+                    const isActive = currentSwaraIdx === idx;
+                    return (
+                      <div 
+                        key={sw.shorthand} 
+                        style={{
+                          flex: 1,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: 11,
+                          fontFamily: "'JetBrains Mono', monospace",
+                          fontWeight: isActive ? "500" : "400",
+                          background: isActive ? "#d88080" : "transparent",
+                          color: isActive ? "#ffffff" : (idx === 0 || idx === 7 || idx === 12 ? "#a8d8a8" : "#5a5448"),
+                          transition: "background 80ms ease, color 80ms ease"
+                        }}
+                        title={sw.label}
+                      >
+                        {sw.shorthand}
+                      </div>
+                    );
+                  })}
                 </div>
-                <div style={{ height: 4, background: "#0a0d14", border: "1px solid #1f242e", borderRadius: 2, overflow: "hidden" }}>
-                  <div style={{
-                    height: "100%",
-                    width: `${Math.min(100, audioLevel * 250)}%`,
-                    background: "#a8d8a8",
-                    transition: "width 60ms ease-out",
-                  }} />
+
+                {/* Real-time Rolling Canvas Display Component */}
+                <div style={{ flex: 1, position: "relative", height: "100%" }}>
+                  <canvas 
+                    ref={canvasRef} 
+                    width={450} 
+                    height={360} 
+                    style={{ width: "100%", height: "100%", display: "block" }}
+                  />
+                  {!running && (
+                    <div style={{
+                      position: "absolute",
+                      inset: 0,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "#4a4438",
+                      fontStyle: "italic",
+                      fontSize: 18,
+                      background: "rgba(7,9,14,0.4)"
+                    }}>
+                      press start to trace engine
+                    </div>
+                  )}
+                  {running && !reading && (
+                    <div style={{
+                      position: "absolute",
+                      top: 12,
+                      right: 12,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      fontSize: 10,
+                      color: "#5a5448",
+                      letterSpacing: "0.05em"
+                    }}>
+                      No Signal
+                    </div>
+                  )}
                 </div>
               </div>
-            )}
-          </div>
+
+              {/* Subtext readouts */}
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                marginTop: 14,
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 11,
+                color: "#6a6458"
+              }}>
+                <div>
+                  {reading ? `${SWARAS[currentSwaraIdx]?.label || 'Tracking...'} (${reading.freq.toFixed(1)} Hz)` : "—"}
+                </div>
+                <div style={{ color: reading ? (inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080") : "#3a3428" }}>
+                  {reading ? `${reading.cents > 0 ? "+" : ""}${reading.cents}¢` : ""}
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* CLASSIC METER VIEW */
+            <div>
+              <div style={{
+                textAlign: "center",
+                minHeight: 180,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+              }}>
+                {reading ? (
+                  <>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 4 }}>
+                      <span style={{
+                        fontSize: 144,
+                        lineHeight: 1,
+                        fontWeight: 300,
+                        letterSpacing: "-0.04em",
+                        color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1",
+                        transition: "color 200ms ease",
+                        textShadow: inTune ? "0 0 30px rgba(168,216,168,0.4)" : "none",
+                      }}>
+                        {reading.note.replace(/[#b]/, "")}
+                      </span>
+                      {reading.note.includes("#") && (
+                        <span style={{ fontSize: 72, lineHeight: 1, fontWeight: 300, color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1" }}>♯</span>
+                      )}
+                      {reading.note.includes("b") && (
+                        <span style={{ fontSize: 72, lineHeight: 1, fontWeight: 300, color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1" }}>♭</span>
+                      )}
+                      <span style={{ fontSize: 32, color: "#5a5448", fontWeight: 300, marginLeft: 8 }}>
+                        {reading.octave}
+                      </span>
+                    </div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace', monospace", fontSize: 12, color: "#6a6458", letterSpacing: "0.1em", marginTop: 8 }}>
+                      {reading.freq.toFixed(2)} Hz
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 22, color: "#4a4438", fontStyle: "italic", letterSpacing: "0.05em" }}>
+                    {running ? "listening…" : "press start to begin"}
+                  </div>
+                )}
+              </div>
+
+              <div style={{ marginTop: 24, position: "relative" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#5a5448", marginBottom: 6, letterSpacing: "0.05em" }}>
+                  <span>−50</span><span>−25</span>
+                  <span style={{ color: "#a8d8a8" }}>0</span>
+                  <span>+25</span><span>+50</span>
+                </div>
+                <div style={{ position: "relative", height: 60, background: "#0a0d14", borderRadius: 2, border: "1px solid #1f242e", overflow: "hidden" }}>
+                  <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(168,216,168,0.3)" }} />
+                  {[-40, -30, -20, -10, 10, 20, 30, 40].map((v) => (
+                    <div key={v} style={{ position: "absolute", left: `${50 + v}%`, top: 8, bottom: 8, width: 1, background: "rgba(255,255,255,0.06)" }} />
+                  ))}
+                  {reading && (
+                    <div style={{
+                      position: "absolute",
+                      left: `${50 + needleAngle}%`,
+                      top: 4, bottom: 4, width: 2,
+                      transform: "translateX(-50%)",
+                      background: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080",
+                      boxShadow: inTune ? "0 0 12px rgba(168,216,168,0.6)" : close ? "0 0 8px rgba(232,216,168,0.4)" : "0 0 6px rgba(216,128,128,0.4)",
+                      transition: "left 80ms ease-out, background 200ms ease",
+                    }} />
+                  )}
+                </div>
+                <div style={{
+                  textAlign: "center",
+                  marginTop: 10,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 13,
+                  color: reading ? (inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080") : "#3a3428",
+                  letterSpacing: "0.1em",
+                  minHeight: 18,
+                }}>
+                  {reading ? `${reading.cents > 0 ? "+" : ""}${reading.cents} cents ${inTune ? "· in tune" : reading.cents > 0 ? "· sharp" : "· flat"}` : "—"}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Core Hardware Audio Gain Diagnostics Meter */}
+          {running && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{
+                fontFamily: "'JetBrains Mono', monospace",
+                fontSize: 9,
+                color: "#5a5448",
+                letterSpacing: "0.2em",
+                textAlign: "center",
+                marginBottom: 4,
+                textTransform: "uppercase",
+              }}>
+                Mic level {audioLevel < 0.05 ? "· no signal" : audioLevel < 0.2 ? "· quiet" : "· OK"}
+              </div>
+              <div style={{ height: 4, background: "#0a0d14", border: "1px solid #1f242e", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%",
+                  width: `${Math.min(100, audioLevel * 50)}%`,
+                  background: audioLevel < 0.05 ? "#d88080" : audioLevel < 0.2 ? "#e8d8a8" : "#a8d8a8",
+                  transition: "width 80ms ease-out, background 200ms ease",
+                }} />
+              </div>
+            </div>
+          )}
         </div>
 
-        <div style={{ marginTop: 20, display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
+        {/* Primary Action Panel Controls */}
+        <div style={{ marginTop: 20, display: "flex", justifyContent: "center", gap: 10, flexWrap: "wrap" }}>
           {!running ? (
-            <button onClick={start} style={btnStyle("#4a5468", "#e8e6e1")}>Start</button>
+            <button onClick={start} style={btnStyle("#4a5468", "#e8e6e1")}>Start Engine</button>
           ) : (
-            <button onClick={stop} style={btnStyle("#6a4848", "#d88080")}>Stop</button>
+            <button onClick={stop} style={btnStyle("#6a4848", "#d88080")}>Stop Engine</button>
           )}
+          
           <button
-            onClick={() => setShowSettings((s) => !s)}
+            onClick={() => { setShowTonicConfig((t) => !t); setShowSettings(false); }}
+            style={btnStyle(showTonicConfig ? "#a8d8a8" : "#4a5468", showTonicConfig ? "#a8d8a8" : "#a8a498")}
+          >
+            Tonic Configuration
+          </button>
+
+          <button
+            onClick={() => { setShowSettings((s) => !s); setShowTonicConfig(false); }}
             style={btnStyle(showSettings ? "#a8d8a8" : "#4a5468", showSettings ? "#a8d8a8" : "#a8a498")}
           >
-            {showSettings ? "Hide settings" : "Settings"}
+            {showSettings ? "Hide Settings" : "System Settings"}
           </button>
         </div>
 
@@ -672,6 +833,50 @@ function Tuner() {
           </div>
         )}
 
+        {/* TONIC CALIBRATION CONTEXT COMPONENT */}
+        {showTonicConfig && (
+          <div style={{
+            marginTop: 20,
+            background: "linear-gradient(180deg, #14181f 0%, #0c0f15 100%)",
+            border: "1px solid #2a2f3a",
+            borderRadius: 4,
+            padding: "24px",
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 12,
+            color: "#a8a498",
+          }}>
+            <div style={labelStyle}>Select Base Tonic Pitch (Sa)</div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 16 }}>
+              {NOTE_SHARPS.map((n) => (
+                <button 
+                  key={n} 
+                  onClick={() => setTonicNote(n)} 
+                  style={{ ...chipStyle(tonicNote === n), minWidth: 42 }}
+                >
+                  {n.replace("#", "♯")}
+                </button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+              <span style={{ fontSize: 11, color: "#6a6458" }}>Octave Register:</span>
+              {[1, 2, 3, 4, 5].map((o) => (
+                <button 
+                  key={o} 
+                  onClick={() => setTonicOctave(o)} 
+                  style={chipStyle(tonicOctave === o)}
+                >
+                  {o}
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 10, color: "#5a5448", marginTop: 12, lineHeight: 1.5 }}>
+              Saptak indicator context labels trace frequency maps starting explicitly from the configured baseline Sa. Changing this transforms raw musical pitch frequencies to relative intervals.
+            </div>
+          </div>
+        )}
+
+        {/* SYSTEM HARDWARE CONFIGURATION SETTINGS */}
         {showSettings && (
           <div style={{
             marginTop: 20,
@@ -684,17 +889,15 @@ function Tuner() {
             color: "#a8a498",
           }}>
             <div style={{ marginBottom: 24 }}>
-              <div style={labelStyle}>A4 calibration · {a4} Hz</div>
+              <div style={labelStyle}>A4 Master Calibration · {a4} Hz</div>
               <input type="range" min={415} max={466} step={1} value={a4} onChange={(e) => setA4(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
-              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                {[415, 432, 440, 442, 466].map((v) => (
-                  <button key={v} onClick={() => setA4(v)} style={chipStyle(a4 === v)}>{v} Hz</button>
-                ))}
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#5a5448", marginTop: 4 }}>
+                <span>415 Baroque</span><span>440 Standard</span><span>442 Orchestral</span><span>466</span>
               </div>
             </div>
 
             <div style={{ marginBottom: 24 }}>
-              <div style={labelStyle}>Accidentals</div>
+              <div style={labelStyle}>Accidentals (Classic View Only)</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setUseFlats(false)} style={chipStyle(!useFlats)}>♯ Sharps</button>
                 <button onClick={() => setUseFlats(true)} style={chipStyle(useFlats)}>♭ Flats</button>
@@ -702,7 +905,7 @@ function Tuner() {
             </div>
 
             <div style={{ marginBottom: 24 }}>
-              <div style={labelStyle}>Instrument transposition</div>
+              <div style={labelStyle}>Instrument Transposition</div>
               <select value={instrument} onChange={(e) => setInstrument(e.target.value)} style={{
                 width: "100%", background: "#0a0d14", color: "#e8e6e1",
                 border: "1px solid #2a2f3a", borderRadius: 2, padding: "8px 10px",
@@ -715,11 +918,11 @@ function Tuner() {
             </div>
 
             <div>
-              <div style={labelStyle}>Reference tone generator</div>
+              <div style={labelStyle}>Reference Tone Generator (Concert Pitch)</div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                 {refNoteList.map((n) => (
                   <button key={n} onClick={() => setRefNote(n)} style={{ ...chipStyle(refNote === n), minWidth: 36 }}>
-                    {n}
+                    {n.replace("#", "♯").replace("b", "♭")}
                   </button>
                 ))}
               </div>
@@ -731,10 +934,15 @@ function Tuner() {
               </div>
               <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 {!refPlaying ? (
-                  <button onClick={playReference} style={btnStyle("#4a5468", "#a8d8a8")}>▶ Play Reference</button>
+                  <button onClick={playReference} style={btnStyle("#4a5468", "#a8d8a8")}>
+                    ▶ Play {refNote.replace("#", "♯").replace("b", "♭")}{refOctave}
+                  </button>
                 ) : (
-                  <button onClick={stopReference} style={btnStyle("#6a4848", "#d88080")}>■ Stop tone</button>
+                  <button onClick={stopReference} style={btnStyle("#6a4848", "#d88080")}>■ Stop Tone</button>
                 )}
+                <span style={{ fontSize: 11, color: "#6a6458" }}>
+                  {(noteToFreq(refNote, refOctave, a4) || 0).toFixed(2)} Hz
+                </span>
               </div>
             </div>
           </div>
@@ -749,7 +957,8 @@ function Tuner() {
           lineHeight: 1.6,
           fontFamily: "'JetBrains Mono', monospace",
         }}>
-          Optimized for continuous real-time musical performance tracking
+          Sing steady individual tones · Calibrated explicitly for vocal practice<br />
+          Saptak indicators: ( ) Mandra / lower · (') Tar / upper register
         </div>
       </div>
     </div>
