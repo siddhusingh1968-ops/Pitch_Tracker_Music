@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
-<title>Chromatic Tuner & Pitch Tracker</title>
+<title>Chromatic Tuner & Pitch Contour Tracker</title>
 
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="mobile-web-app-capable" content="yes" />
@@ -23,13 +23,11 @@
     margin: 0;
     padding: 0;
     background: #0a0d14;
-    /* prevent rubber-band scroll on iOS when running fullscreen */
     overscroll-behavior: none;
     -webkit-tap-highlight-color: transparent;
   }
   body {
     font-family: 'Cormorant Garamond', Georgia, serif;
-    /* respect the notch / home indicator on iPhone */
     padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
     min-height: 100vh;
   }
@@ -40,9 +38,8 @@
     -webkit-touch-callout: none;
     -webkit-user-select: none;
     user-select: none;
-    touch-action: manipulation; /* removes 300ms tap delay */
+    touch-action: manipulation;
   }
-  /* iOS zooms on focus when input font-size < 16px — prevent that */
   select, input { font-size: 16px; }
   input[type=range] { accent-color: #a8d8a8; }
 </style>
@@ -58,11 +55,10 @@ const NOTE_FLATS  = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb",
 
 const INSTRUMENTS = [
   { id: "concert", label: "Concert pitch (C)", semitones: 0 },
-  { id: "bb", label: "B♭ instrument (trumpet, clarinet, tenor sax)", semitones: 2 },
-  { id: "eb", label: "E♭ instrument (alto sax, alto clarinet)", semitones: 9 },
-  { id: "f", label: "F instrument (French horn, English horn)", semitones: 7 },
-  { id: "bb_bass", label: "B♭ bass (bass clarinet, tenor sax 8va)", semitones: 14 },
-  { id: "guitar", label: "Guitar (sounds 8va below written)", semitones: -12 },
+  { id: "bb", label: "B♭ instrument", semitones: 2 },
+  { id: "eb", label: "E♭ instrument", semitones: 9 },
+  { id: "f", label: "F instrument", semitones: 7 },
+  { id: "guitar", label: "Guitar (sounds 8va below)", semitones: -12 },
 ];
 
 function freqToNote(freq, a4 = 440, useFlats = false, transposeSemitones = 0) {
@@ -91,9 +87,8 @@ function autoCorrelate(buf, sampleRate) {
   let rms = 0;
   for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
   rms = Math.sqrt(rms / SIZE);
-  if (rms < 0.003) return -1;
+  if (rms < 0.003) return -1; // Audio gate for floor noise
 
-  // Trim quiet edges
   let r1 = 0, r2 = SIZE - 1;
   const thres = 0.05;
   for (let i = 0; i < SIZE / 2; i++) if (Math.abs(buf[i]) < thres) { r1 = i; break; }
@@ -203,10 +198,11 @@ function Tuner() {
   const bufferRef = useRef(null);
   const recentFreqsRef = useRef([]);
   
-  // Real-time canvas tracking configurations
+  // High-performance canvas layout configurations
   const canvasRef = useRef(null);
-  const pitchHistoryRef = useRef([]);
-  const maxHistoryPoints = 350; 
+  const maxHistoryPoints = 400;
+  const pitchHistoryRef = useRef(new Array(maxHistoryPoints).fill(null));
+  const centerMidiRef = useRef(60); // Starts at middle C (MIDI 60)
 
   const refOscRef = useRef(null);
   const refGainRef = useRef(null);
@@ -221,14 +217,9 @@ function Tuner() {
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false,
+          autoGainControl: true,
           sampleRate: 48000,
           channelCount: 1,
-          googEchoCancellation: false,
-          googAutoGainControl: false,
-          googNoiseSuppression: false,
-          googHighpassFilter: false,
-          googTypingNoiseDetection: false,
         },
       };
       let stream;
@@ -244,21 +235,18 @@ function Tuner() {
       if (ctx.state === "suspended") {
         try { await ctx.resume(); } catch (e) {}
       }
+      
       const source = ctx.createMediaStreamSource(stream);
-      const gain = ctx.createGain();
-      gain.gain.value = 25;
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 2048;
-      source.connect(gain);
-      gain.connect(analyser);
+      
+      // Removed the excessive 25x gain stage to stop audio clipping distortion
+      source.connect(analyser);
+      
       analyserRef.current = analyser;
       bufferRef.current = new Float32Array(analyser.fftSize);
+      pitchHistoryRef.current = new Array(maxHistoryPoints).fill(null);
       setRunning(true);
-      
-      // Flush previous line trace history upon re-starting context
-      pitchHistoryRef.current = [];
-      
-      tick();
     } catch (e) {
       setError((e && e.message) || "Could not access microphone.");
       setRunning(false);
@@ -281,15 +269,9 @@ function Tuner() {
     setReading(null);
     setSmoothCents(0);
     recentFreqsRef.current = [];
-    
-    // Clear the active rendering timeline canvas
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const ctx = canvas.getContext("2d");
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
   }
 
+  // Draw timeline interface function
   function drawPitchTimeline() {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -297,61 +279,82 @@ function Tuner() {
     const w = canvas.width;
     const h = canvas.height;
 
-    ctx.clearRect(0, 0, w, h);
-
-    // Render subtle decorative scale background tracks
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.03)";
-    ctx.lineWidth = 1;
-    const trackCount = 5;
-    for (let i = 1; i <= trackCount; i++) {
-      const yPos = (h / (trackCount + 1)) * i;
-      ctx.beginPath();
-      ctx.moveTo(0, yPos);
-      ctx.lineTo(w, yPos);
-      ctx.stroke();
-    }
+    // Background clearing
+    ctx.fillStyle = "#0a0d14";
+    ctx.fillRect(0, 0, w, h);
 
     const history = pitchHistoryRef.current;
-    if (history.length === 0) return;
-
-    // Filter valid frequencies to define a local auto-scaling bound
-    const activePitches = history.filter((p) => p !== null);
-    let minF = 65;   // Stable default bottom bound (approx C2)
-    let maxF = 1050; // Stable default upper bound (approx C6)
-
-    if (activePitches.length > 0) {
-      const dataMin = Math.min(...activePitches);
-      const dataMax = Math.max(...activePitches);
-      // Pad boundaries dynamically so line trajectory doesn't clamp out of frame
-      minF = Math.max(40, dataMin * 0.88);
-      maxF = Math.min(2500, dataMax * 1.12);
+    
+    // Smoothly calculate target centering box around active audio signals
+    let latestMidi = null;
+    for (let i = history.length - 1; i >= 0; i--) {
+      if (history[i] !== null) {
+        latestMidi = 69 + 12 * Math.log2(history[i] / a4);
+        break;
+      }
+    }
+    if (latestMidi !== null) {
+      centerMidiRef.current += (latestMidi - centerMidiRef.current) * 0.05;
     }
 
-    ctx.lineWidth = 2.5;
-    ctx.strokeStyle = "#a8d8a8"; 
-    ctx.shadowBlur = 6;
+    const centerMidi = centerMidiRef.current;
+    const semitoneViewWindow = 8; // Zoom view context level (+/- 8 semitones out from center)
+
+    // Draw horizontal note alignment grid lanes
+    const startMidi = Math.ceil(centerMidi - semitoneViewWindow);
+    const endMidi = Math.floor(centerMidi + semitoneViewWindow);
+    const labelMarginLeft = 45;
+
+    ctx.font = "10px 'JetBrains Mono', monospace";
+    for (let m = startMidi; m <= endMidi; m++) {
+      const diff = m - centerMidi;
+      const y = h / 2 - (diff / semitoneViewWindow) * (h / 2);
+
+      const isC = m % 12 === 0;
+      ctx.strokeStyle = isC ? "rgba(168, 216, 168, 0.15)" : "rgba(255, 255, 255, 0.03)";
+      ctx.lineWidth = isC ? 1.5 : 1;
+      
+      ctx.beginPath();
+      ctx.moveTo(labelMarginLeft, y);
+      ctx.lineTo(w, y);
+      ctx.stroke();
+
+      const names = useFlats ? NOTE_FLATS : NOTE_SHARPS;
+      const noteName = names[((m % 12) + 12) % 12];
+      const octave = Math.floor(m / 12) - 1;
+      
+      ctx.fillStyle = isC ? "#a8d8a8" : "#5a5448";
+      ctx.fillText(`${noteName}${octave}`, 8, y + 4);
+    }
+
+    // Render the continuous pitch contour line trace path
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#a8d8a8";
+    ctx.shadowBlur = 8;
     ctx.shadowColor = "rgba(168, 216, 168, 0.4)";
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
+    
     ctx.beginPath();
-
     let isDrawing = false;
 
     for (let i = 0; i < history.length; i++) {
       const freq = history[i];
-      // Generate standard right-to-left rolling timeline positioning
-      const x = (i / (maxHistoryPoints - 1)) * w;
+      const x = labelMarginLeft + (i / (maxHistoryPoints - 1)) * (w - labelMarginLeft);
 
       if (freq === null || freq <= 0) {
         isDrawing = false;
         continue;
       }
 
-      // Safe logarithmic pitch mapping logic to emulate linear sensory distribution
-      const logMin = Math.log2(minF);
-      const logMax = Math.log2(maxF);
-      const logVal = Math.log2(freq);
-      const y = h - ((logVal - logMin) / (logMax - logMin)) * h;
+      const midiVal = 69 + 12 * Math.log2(freq / a4);
+      const diff = midiVal - centerMidi;
+      const y = h / 2 - (diff / semitoneViewWindow) * (h / 2);
+
+      if (y < 0 || y > h) {
+        isDrawing = false;
+        continue;
+      }
 
       if (!isDrawing) {
         ctx.moveTo(x, y);
@@ -361,63 +364,76 @@ function Tuner() {
       }
     }
     ctx.stroke();
-    ctx.shadowBlur = 0; // Reset canvas context state
+    ctx.shadowBlur = 0; // Reset canvas context matrix state
   }
 
-  function tick() {
-    const analyser = analyserRef.current;
-    const ctx = audioCtxRef.current;
-    const buf = bufferRef.current;
-    if (!analyser || !ctx) return;
-    analyser.getFloatTimeDomainData(buf);
+  // Safe continuous tracking loop hook 
+  useEffect(() => {
+    if (!running) return;
 
-    let peak = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const v = Math.abs(buf[i]);
-      if (v > peak) peak = v;
-    }
-    setAudioLevel(peak);
-
-    const freq = autoCorrelate(buf, ctx.sampleRate);
-    const history = pitchHistoryRef.current;
-
-    if (freq > 0 && freq < 4000) {
-      const recent = recentFreqsRef.current;
-
-      if (recent.length >= 2) {
-        const sortedPrev = [...recent].sort((a, b) => a - b);
-        const prevMedian = sortedPrev[Math.floor(sortedPrev.length / 2)];
-        const ratio = freq / prevMedian;
-        if (ratio > 1.0176 || ratio < 0.9827) {
-          recent.length = 0;
-        }
-      }
-
-      recent.push(freq);
-      if (recent.length > 3) recent.shift();
-      const sorted = [...recent].sort((a, b) => a - b);
-      const median = sorted[Math.floor(sorted.length / 2)];
-      const r = freqToNote(median, a4, useFlats, transposeSemitones);
-      if (r) {
-        setReading(r);
-        setSmoothCents((prev) => prev + (r.cents - prev) * 0.4);
+    function tick() {
+      const analyser = analyserRef.current;
+      const ctx = audioCtxRef.current;
+      const buf = bufferRef.current;
+      if (!analyser || !ctx || !buf) {
+        rafRef.current = requestAnimationFrame(tick);
+        return;
       }
       
-      history.push(median);
-    } else {
-      // Input drops under pitch thresholds: pass gap to stop connecting lines across silences
-      history.push(null);
-    }
+      analyser.getFloatTimeDomainData(buf);
 
-    if (history.length > maxHistoryPoints) {
-      history.shift();
-    }
+      let peak = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = Math.abs(buf[i]);
+        if (v > peak) peak = v;
+      }
+      setAudioLevel(peak);
 
-    // Paint contour line onto canvas
-    drawPitchTimeline();
+      const freq = autoCorrelate(buf, ctx.sampleRate);
+      const history = pitchHistoryRef.current;
+
+      if (freq > 50 && freq < 2000) {
+        const recent = recentFreqsRef.current;
+        if (recent.length >= 2) {
+          const sortedPrev = [...recent].sort((a, b) => a - b);
+          const prevMedian = sortedPrev[Math.floor(sortedPrev.length / 2)];
+          const ratio = freq / prevMedian;
+          if (ratio > 1.0176 || ratio < 0.9827) {
+            recent.length = 0;
+          }
+        }
+
+        recent.push(freq);
+        if (recent.length > 3) recent.shift();
+        const sorted = [...recent].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        
+        const r = freqToNote(median, a4, useFlats, transposeSemitones);
+        if (r) {
+          setReading(r);
+          setSmoothCents((prev) => prev + (r.cents - prev) * 0.3);
+        }
+        history.push(median);
+      } else {
+        if (peak < 0.002) {
+          setReading(null);
+        }
+        history.push(null);
+      }
+
+      if (history.length > maxHistoryPoints) {
+        history.shift();
+      }
+
+      drawPitchTimeline();
+      rafRef.current = requestAnimationFrame(tick);
+    }
 
     rafRef.current = requestAnimationFrame(tick);
-  }
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [running, a4, useFlats, transposeSemitones]);
 
   function playReference() {
     stopReference();
@@ -468,13 +484,6 @@ function Tuner() {
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
-
-  useEffect(() => {
-    if (reading) {
-      const r = freqToNote(reading.freq, a4, useFlats, transposeSemitones);
-      if (r) setReading(r);
-    }
-  }, [a4, useFlats, transposeSemitones]);
 
   useEffect(() => {
     if (refPlaying) playReference();
@@ -561,9 +570,6 @@ function Tuner() {
                 </div>
                 <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 12, color: "#6a6458", letterSpacing: "0.1em", marginTop: 8 }}>
                   {reading.freq.toFixed(2)} Hz
-                  {transposeSemitones !== 0 && (
-                    <span style={{ marginLeft: 8, color: "#4a4438" }}>(written)</span>
-                  )}
                 </div>
               </>
             ) : (
@@ -581,7 +587,6 @@ function Tuner() {
             </div>
             <div style={{ position: "relative", height: 60, background: "#0a0d14", borderRadius: 2, border: "1px solid #1f242e", overflow: "hidden" }}>
               <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(168,216,168,0.3)" }} />
-              <div style={{ position: "absolute", left: "calc(50% - 5%)", top: 0, bottom: 0, width: "10%", background: "linear-gradient(90deg, transparent, rgba(168,216,168,0.08), transparent)" }} />
               {[-40, -30, -20, -10, 10, 20, 30, 40].map((v) => (
                 <div key={v} style={{ position: "absolute", left: `${50 + v}%`, top: 8, bottom: 8, width: 1, background: "rgba(255,255,255,0.06)" }} />
               ))}
@@ -592,8 +597,8 @@ function Tuner() {
                   top: 4, bottom: 4, width: 2,
                   transform: "translateX(-50%)",
                   background: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080",
-                  boxShadow: inTune ? "0 0 12px rgba(168,216,168,0.6)" : close ? "0 0 8px rgba(232,216,168,0.4)" : "0 0 6px rgba(216,128,128,0.4)",
-                  transition: "left 80ms ease-out, background 200ms ease",
+                  boxShadow: inTune ? "0 0 12px rgba(168,216,168,0.6)" : "none",
+                  transition: "left 80ms ease-out",
                 }} />
               )}
             </div>
@@ -606,19 +611,17 @@ function Tuner() {
               letterSpacing: "0.1em",
               minHeight: 18,
             }}>
-              {reading
-                ? `${reading.cents > 0 ? "+" : ""}${reading.cents} cents ${inTune ? "· in tune" : reading.cents > 0 ? "· sharp" : "· flat"}`
-                : "—"}
+              {reading ? `${reading.cents > 0 ? "+" : ""}${reading.cents} cents` : "—"}
             </div>
 
-            {/* REAL-TIME SCROLLING PITCH LINE VISUALIZATION */}
-            <div style={{ marginTop: 24 }}>
+            {/* REAL-TIME SCROLLING PITCH CONTOUR TRACKER */}
+            <div style={{ marginTop: 28 }}>
               <div style={labelStyle}>Real-Time Pitch Contour Tracker</div>
-              <div style={{ position: "relative", height: 150, background: "#0a0d14", borderRadius: 2, border: "1px solid #1f242e", overflow: "hidden" }}>
+              <div style={{ position: "relative", height: 180, background: "#0a0d14", borderRadius: 2, border: "1px solid #1f242e", overflow: "hidden" }}>
                 <canvas 
                   ref={canvasRef} 
                   width={512} 
-                  height={150} 
+                  height={180} 
                   style={{ width: "100%", height: "100%", display: "block" }} 
                 />
               </div>
@@ -633,16 +636,15 @@ function Tuner() {
                   letterSpacing: "0.2em",
                   textAlign: "center",
                   marginBottom: 4,
-                  textTransform: "uppercase",
                 }}>
-                  Mic level {audioLevel < 0.05 ? "· no signal" : audioLevel < 0.2 ? "· quiet" : "· OK"}
+                  Mic audio input level
                 </div>
                 <div style={{ height: 4, background: "#0a0d14", border: "1px solid #1f242e", borderRadius: 2, overflow: "hidden" }}>
                   <div style={{
                     height: "100%",
-                    width: `${Math.min(100, audioLevel * 50)}%`,
-                    background: audioLevel < 0.05 ? "#d88080" : audioLevel < 0.2 ? "#e8d8a8" : "#a8d8a8",
-                    transition: "width 80ms ease-out, background 200ms ease",
+                    width: `${Math.min(100, audioLevel * 250)}%`,
+                    background: "#a8d8a8",
+                    transition: "width 60ms ease-out",
                   }} />
                 </div>
               </div>
@@ -684,12 +686,9 @@ function Tuner() {
             <div style={{ marginBottom: 24 }}>
               <div style={labelStyle}>A4 calibration · {a4} Hz</div>
               <input type="range" min={415} max={466} step={1} value={a4} onChange={(e) => setA4(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#5a5448", marginTop: 4 }}>
-                <span>415 Baroque</span><span>440 Standard</span><span>442 Orchestral</span><span>466</span>
-              </div>
               <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                {[415, 432, 440, 441, 442, 443, 444].map((v) => (
-                  <button key={v} onClick={() => setA4(v)} style={chipStyle(a4 === v)}>{v}</button>
+                {[415, 432, 440, 442, 466].map((v) => (
+                  <button key={v} onClick={() => setA4(v)} style={chipStyle(a4 === v)}>{v} Hz</button>
                 ))}
               </div>
             </div>
@@ -713,37 +712,29 @@ function Tuner() {
                   <option key={i.id} value={i.id}>{i.label}</option>
                 ))}
               </select>
-              <div style={{ fontSize: 10, color: "#5a5448", marginTop: 6, lineHeight: 1.5 }}>
-                Display shows the <em>written</em> note for your instrument.
-              </div>
             </div>
 
             <div>
-              <div style={labelStyle}>Reference tone (concert pitch)</div>
+              <div style={labelStyle}>Reference tone generator</div>
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
                 {refNoteList.map((n) => (
                   <button key={n} onClick={() => setRefNote(n)} style={{ ...chipStyle(refNote === n), minWidth: 36 }}>
-                    {n.replace("#", "♯").replace("b", "♭")}
+                    {n}
                   </button>
                 ))}
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                 <span style={{ fontSize: 11, color: "#6a6458" }}>Octave</span>
                 {[2, 3, 4, 5, 6].map((o) => (
                   <button key={o} onClick={() => setRefOctave(o)} style={chipStyle(refOctave === o)}>{o}</button>
                 ))}
               </div>
-              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                 {!refPlaying ? (
-                  <button onClick={playReference} style={btnStyle("#4a5468", "#a8d8a8")}>
-                    ▶ Play {refNote.replace("#", "♯").replace("b", "♭")}{refOctave}
-                  </button>
+                  <button onClick={playReference} style={btnStyle("#4a5468", "#a8d8a8")}>▶ Play Reference</button>
                 ) : (
                   <button onClick={stopReference} style={btnStyle("#6a4848", "#d88080")}>■ Stop tone</button>
                 )}
-                <span style={{ fontSize: 11, color: "#6a6458" }}>
-                  {(noteToFreq(refNote, refOctave, a4) || 0).toFixed(2)} Hz
-                </span>
               </div>
             </div>
           </div>
@@ -758,8 +749,7 @@ function Tuner() {
           lineHeight: 1.6,
           fontFamily: "'JetBrains Mono', monospace",
         }}>
-          play one note at a time · works best in a quiet room<br />
-          voice, guitar, piano, wind & string instruments
+          Optimized for continuous real-time musical performance tracking
         </div>
       </div>
     </div>
