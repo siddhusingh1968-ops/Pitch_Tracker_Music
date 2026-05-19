@@ -1,1 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+<title>Indian Classical Vocal Tuner & Tracker</title>
 
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="RagaTuner" />
+<meta name="theme-color" content="#0a0d14" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0a0d14;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  body {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    min-height: 100vh;
+  }
+  * { box-sizing: border-box; }
+  button {
+    font-family: inherit;
+    -webkit-appearance: none;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: manipulation;
+  }
+  select, input { font-size: 16px; }
+  input[type=range] { accent-color: #a8d8a8; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+// Precise Hindustani Shorthand schema from your chart
+const SWARAS = [
+  { short: "S", long: "Shadja (Sa)" },
+  { short: "r", long: "Komal Rishabh (re)" },
+  { short: "R", long: "Shuddha Rishabh (Re)" },
+  { short: "g", long: "Komal Gandhar (ga)" },
+  { short: "G", long: "Shuddha Gandhar (Ga)" },
+  { short: "m", long: "Shuddha Madhyam (ma)" },
+  { short: "M", long: "Teevra Madhyam (Ma)" },
+  { short: "P", long: "Pancham (Pa)" },
+  { short: "d", long: "Komal Dhaivat (dha)" },
+  { short: "D", long: "Shuddha Dhaivat (Dha)" },
+  { short: "n", long: "Komal Nishad (ni)" },
+  { short: "N", long: "Shuddha Nishad (Ni)" }
+];
+
+const WESTERN_NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+function getMidiFromWestern(note, octave) {
+  const idx = WESTERN_NOTES.indexOf(note);
+  return (octave + 1) * 12 + idx;
+}
+
+function freqToSwara(freq, saNote, saOctave, a4 = 440) {
+  if (!freq || freq <= 0) return null;
+  const concertMidi = 69 + 12 * Math.log2(freq / a4);
+  const saMidi = getMidiFromWestern(saNote, saOctave);
+  
+  const diff = concertMidi - saMidi;
+  const roundDiff = Math.round(diff);
+  const cents = Math.round((diff - roundDiff) * 100);
+  
+  const swaraIdx = ((roundDiff % 12) + 12) % 12;
+  const swara = SWARAS[swaraIdx];
+  
+  // Saptak classification
+  let saptak = "Madhya (Middle)";
+  if (roundDiff < 0) saptak = "Mandra (Lower)";
+  if (roundDiff >= 12) saptak = "Tar (Upper)";
+  
+  return {
+    swara: swara.short,
+    longName: swara.long,
+    cents,
+    freq,
+    midi: concertMidi,
+    saptak
+  };
+}
+
+function autoCorrelate(buf, sampleRate) {
+  const SIZE = buf.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < 0.005) return -1; // Ignore extreme silence
+
+  let r1 = 0, r2 = SIZE - 1;
+  const thres = 0.05;
+  for (let i = 0; i < SIZE / 2; i++) if (Math.abs(buf[i]) < thres) { r1 = i; break; }
+  for (let i = 1; i < SIZE / 2; i++) if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; }
+  const trimmed = buf.slice(r1, r2);
+  const n = trimmed.length;
+
+  const minLag = Math.max(2, Math.floor(sampleRate / 1200)); 
+  const maxLag = Math.min(n - 2, Math.floor(sampleRate / 60)); // Low pitch limit around 60Hz
+
+  let bestLag = -1;
+  let bestCorr = 0;
+  let prevCorr = 0;
+  let foundDip = false;
+
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    let corr = 0;
+    const limit = n - lag;
+    for (let j = 0; j < limit; j++) corr += trimmed[j] * trimmed[j + lag];
+    corr = corr / limit;
+
+    if (!foundDip) {
+      if (corr < prevCorr) foundDip = true;
+    } else if (corr > bestCorr) {
+      bestCorr = corr;
+      bestLag = lag;
+    }
+    prevCorr = corr;
+  }
+
+  if (bestLag < 0 || bestCorr < 0.01) return -1;
+
+  let T0 = bestLag;
+  if (bestLag > minLag && bestLag < maxLag) {
+    let cm1 = 0, c0 = 0, cp1 = 0;
+    const lm1 = bestLag - 1, lp1 = bestLag + 1;
+    for (let j = 0; j < n - lp1; j++) {
+      cm1 += trimmed[j] * trimmed[j + lm1];
+      c0  += trimmed[j] * trimmed[j + bestLag];
+      cp1 += trimmed[j] * trimmed[j + lp1];
+    }
+    const a = (cm1 + cp1 - 2 * c0) / 2;
+    const b = (cp1 - cm1) / 2;
+    if (a) T0 = bestLag - b / (2 * a);
+  }
+
+  return sampleRate / T0;
+}
+
+// UI Styles
+function btnStyle(border, color, isActive = false) {
+  return {
+    background: isActive ? "rgba(168,216,168,0.15)" : "transparent",
+    border: `1px solid ${isActive ? "#a8d8a8" : border}`,
+    color: isActive ? "#a8d8a8" : color,
+    padding: "12px 20px",
+    fontSize: 10,
+    letterSpacing: "0.25em",
+    textTransform: "uppercase",
+    fontFamily: "'JetBrains Mono', monospace",
+    cursor: "pointer",
+    transition: "all 200ms ease",
+  };
+}
+
+function chipStyle(active) {
+  return {
+    background: active ? "rgba(168,216,168,0.12)" : "transparent",
+    border: `1px solid ${active ? "#a8d8a8" : "#2a2f3a"}`,
+    color: active ? "#a8d8a8" : "#8a8478",
+    padding: "5px 10px",
+    fontSize: 11,
+    fontFamily: "'JetBrains Mono', monospace",
+    cursor: "pointer",
+    borderRadius: 2,
+    transition: "all 150ms ease",
+  };
+}
+
+const labelStyle = {
+  fontSize: 10,
+  letterSpacing: "0.25em",
+  textTransform: "uppercase",
+  color: "#8a8478",
+  marginBottom: 10,
+};
+
+function App() {
+  const [a4, setA4] = useState(440);
+  const [saNote, setSaNote] = useState("C#");
+  const [saOctave, setSaOctave] = useState(3);
+  const [viewMode, setViewMode] = useState("tracker"); // Default to tracking graph
+  const [showSettings, setShowSettings] = useState(false);
+
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState(null);
+  const [reading, setReading] = useState(null);
+  const [smoothCents, setSmoothCents] = useState(0);
+  const [audioLevel, setAudioLevel] = useState(0);
+
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const rafRef = useRef(null);
+  const streamRef = useRef(null);
+  const bufferRef = useRef(null);
+  const recentFreqsRef = useRef([]);
+  
+  // Scrolling graph data pipeline
+  const pitchHistoryRef = useRef([]); 
+  const canvasRef = useRef(null);
+
+  // Dynamic references updated immediately for the loop closure safely
+  const loopParams = useRef({ saNote, saOctave, a4 });
+  useEffect(() => {
+    loopParams.current = { saNote, saOctave, a4 };
+  }, [saNote, saOctave, a4]);
+
+  async function start() {
+    try {
+      setError(null);
+      const constraints = {
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+          channelCount: 1,
+        },
+      };
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (e) {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      }
+      
+      streamRef.current = stream;
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AudioCtx();
+      audioCtxRef.current = ctx;
+      
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+      
+      const source = ctx.createMediaStreamSource(stream);
+      const gain = ctx.createGain();
+      gain.gain.value = 1.0; 
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      
+      source.connect(gain);
+      gain.connect(analyser);
+      analyserRef.current = analyser;
+      bufferRef.current = new Float32Array(analyser.fftSize);
+      
+      pitchHistoryRef.current = []; // Wipe graph history clean on initialize
+      setRunning(true);
+    } catch (e) {
+      setError("Could not access microphone. Verify system recording permissions.");
+      setRunning(false);
+    }
+  }
+
+  // Animation cycle handles stream checks and rendering splits
+  useEffect(() => {
+    if (!running) return;
+    
+    function tick() {
+      const analyser = analyserRef.current;
+      const ctx = audioCtxRef.current;
+      const buf = bufferRef.current;
+      if (!analyser || !ctx || !buf) return;
+      
+      analyser.getFloatTimeDomainData(buf);
+
+      let peak = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = Math.abs(buf[i]);
+        if (v > peak) peak = v;
+      }
+      setAudioLevel(peak);
+
+      const freq = autoCorrelate(buf, ctx.sampleRate);
+      const { saNote: currentSa, saOctave: currentOct, a4: currentA4 } = loopParams.current;
+      
+      if (freq > 0 && freq < 3000) {
+        const recent = recentFreqsRef.current;
+        if (recent.length >= 2) {
+          const sortedPrev = [...recent].sort((a, b) => a - b);
+          const prevMedian = sortedPrev[Math.floor(sortedPrev.length / 2)];
+          const ratio = freq / prevMedian;
+          if (ratio > 1.05 || ratio < 0.95) recent.length = 0; // Quick tracking break reset
+        }
+
+        recent.push(freq);
+        if (recent.length > 3) recent.shift();
+        const sorted = [...recent].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        
+        const r = freqToSwara(median, currentSa, currentOct, currentA4);
+        if (r) {
+          setReading(r);
+          setSmoothCents((prev) => prev + (r.cents - prev) * 0.35);
+          // Pipe clean floating-point midi into tracker rolling data deck
+          pitchHistoryRef.current.push({ time: Date.now(), midi: r.midi });
+        }
+      } else {
+        // Feed break values to maintain scrolling animation gaps naturally
+        pitchHistoryRef.current.push({ time: Date.now(), midi: null });
+      }
+
+      if (pitchHistoryRef.current.length > 350) {
+        pitchHistoryRef.current.shift();
+      }
+
+      // Draw real-time visualization onto canvas if operating in Tracker View
+      if (canvasRef.current) {
+        drawTrackerCanvas(canvasRef.current, pitchHistoryRef.current, currentSa, currentOct);
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [running]);
+
+  function drawTrackerCanvas(canvas, history, baseSa, baseOct) {
+    const ctx = canvas.getContext("2d");
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.clearRect(0, 0, W, H);
+
+    const saMidi = getMidiFromWestern(baseSa, baseOct);
+    // View bounds configuration setup: Show roughly ~1.5 Octaves inside frame view height
+    const minMidi = saMidi - 4; 
+    const maxMidi = saMidi + 16; 
+
+    // 1. Render Swara Horizon Grid lines
+    for (let m = Math.floor(minMidi); m <= Math.ceil(maxMidi); m++) {
+      const y = H - ((m - minMidi) / (maxMidi - minMidi)) * H;
+      const diff = m - saMidi;
+      const swaraIdx = ((diff % 12) + 12) % 12;
+      const swaraObj = SWARAS[swaraIdx];
+      
+      const isSaOrPa = swaraObj.short === "S" || swaraObj.short === "P";
+      
+      ctx.strokeStyle = isSaOrPa ? "rgba(168, 216, 168, 0.25)" : "rgba(255, 255, 255, 0.04)";
+      ctx.lineWidth = isSaOrPa ? 1.5 : 0.8;
+      
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+
+      // Side Marginal Metadata Indicators
+      ctx.fillStyle = isSaOrPa ? "#a8d8a8" : "#4a4e59";
+      ctx.font = "11px 'JetBrains Mono', monospace";
+      
+      let indicator = swaraObj.short;
+      if (diff < 0) indicator += " ̣";     // Mandra Saptak sign
+      if (diff >= 12) indicator += " ̇";    // Tar Saptak sign
+      
+      ctx.fillText(indicator, 12, y + 4);
+    }
+
+    // 2. Plot Vocal Waveform Continuous Pitch Path Line Trace
+    if (history.length < 2) return;
+    
+    ctx.strokeStyle = "#a8d8a8";
+    ctx.lineWidth = 3.5;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.shadowBlur = 10;
+    ctx.shadowColor = "rgba(168, 216, 168, 0.5)";
+
+    ctx.beginPath();
+    let isDrawing = false;
+    const pointLimit = 220; 
+    const offsetStart = Math.max(0, history.length - pointLimit);
+
+    for (let i = offsetStart; i < history.length; i++) {
+      const point = history[i];
+      // Generate clean horizontal panning coordinates moving across screen mapping layout right edge
+      const x = ((i - offsetStart) / pointLimit) * (W - 70) + 50;
+
+      if (point.midi === null || point.midi < minMidi || point.midi > maxMidi) {
+        if (isDrawing) {
+          ctx.stroke();
+          ctx.beginPath();
+          isDrawing = false;
+        }
+      } else {
+        const y = H - ((point.midi - minMidi) / (maxMidi - minMidi)) * H;
+        if (!isDrawing) {
+          ctx.moveTo(x, y);
+          isDrawing = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+    }
+    if (isDrawing) ctx.stroke();
+    
+    // Reset global attributes processing properties cleanly
+    ctx.shadowBlur = 0;
+  }
+
+  function stop() {
+    setRunning(false);
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+    if (audioCtxRef.current) {
+      try { audioCtxRef.current.close(); } catch (e) {}
+    }
+    streamRef.current = null;
+    audioCtxRef.current = null;
+    analyserRef.current = null;
+    setReading(null);
+    setSmoothCents(0);
+    recentFreqsRef.current = [];
+    pitchHistoryRef.current = [];
+  }
+
+  useEffect(() => () => stop(), []);
+
+  const cents = reading ? smoothCents : 0;
+  const inTune = reading && Math.abs(reading.cents) <= 6;
+  const close = reading && Math.abs(reading.cents) <= 18;
+  const needleAngle = Math.max(-50, Math.min(50, cents));
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "radial-gradient(ellipse at top, #161b26 0%, #0a0d14 100%)",
+      color: "#e8e6e1",
+      padding: "32px 16px",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+    }}>
+      <div style={{ width: "100%", maxWidth: 560 }}>
+        
+        {/* Upper Dashboard Readouts Header block */}
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <div style={{ fontSize: 12, letterSpacing: "0.35em", color: "#a8d8a8", textTransform: "uppercase", marginBottom: 6, fontWeight: 500 }}>
+            Svara Pitch Tracker
+          </div>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#6a6458", letterSpacing: "0.15em" }}>
+            Tonic Sa = {saNote}{saOctave} ({ (440 * Math.pow(2, (getMidiFromWestern(saNote, saOctave) - 69)/12)).toFixed(1) } Hz)
+          </div>
+        </div>
+
+        {/* Dynamic Mode Switch Navigation Deck */}
+        <div style={{ display: "flex", width: "100%", background: "#0f131c", padding: 4, borderRadius: 6, border: "1px solid #1f2533", marginBottom: 16 }}>
+          <button onClick={() => setViewMode("tracker")} style={{ flex: 1, ...btnStyle("transparent", "#8a8478", viewMode === "tracker"), border: "none" }}>
+            Vocal Pitch Tracker
+          </button>
+          <button onClick={() => setViewMode("tuner")} style={{ flex: 1, ...btnStyle("transparent", "#8a8478", viewMode === "tuner"), border: "none" }}>
+            Classic Meter View
+          </button>
+        </div>
+
+        {/* Central Display Processing Console Block */}
+        <div style={{
+          background: "linear-gradient(180deg, #12161f 0%, #0c0f15 100%)",
+          border: "1px solid #232936",
+          borderRadius: 6,
+          padding: "24px 20px",
+          boxShadow: "0 20px 50px rgba(0,0,0,0.6)",
+        }}>
+          
+          {/* Live Dynamic Switching Processing Engine Panels */}
+          {viewMode === "tracker" ? (
+            <div style={{ position: "relative" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#5a5448" }}>
+                <span>PAST SCROLLING LINE HISTORY</span>
+                <span style={{ color: reading ? "#a8d8a8" : "#5a5448" }}>
+                  {reading ? `Singing: ${reading.swara} (${reading.saptak.split(" ")[0]})` : "No Signal"}
+                </span>
+              </div>
+              <div style={{ background: "#080a0f", border: "1px solid #1a202c", borderRadius: 4, overflow: "hidden", position: "relative" }}>
+                <canvas 
+                  ref={canvasRef} 
+                  width={520} 
+                  height={240} 
+                  style={{ width: "100%", display: "block", height: 240 }}
+                />
+                {!running && (
+                  <div style={{ position: "absolute", inset: 0, background: "rgba(10,13,20,0.85)", display: "flex", alignItems: "center", justifyContent: "center", fontStyle: "italic", color: "#4a4438", fontSize: 16 }}>
+                    Press start to activate tracking canvas
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div>
+              <div style={{
+                textAlign: "center",
+                minHeight: 160,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+              }}>
+                {reading ? (
+                  <>
+                    <div style={{ display: "flex", alignItems: "baseline", gap: 2 }}>
+                      <span style={{
+                        fontSize: 130,
+                        lineHeight: 1,
+                        fontWeight: 300,
+                        color: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#e8e6e1",
+                        textShadow: inTune ? "0 0 40px rgba(168,216,168,0.35)" : "none",
+                        transition: "color 150ms ease",
+                      }}>
+                        {reading.swara}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 18, color: "#8a8478", fontStyle: "italic", marginTop: 4 }}>
+                      {reading.longName}
+                    </div>
+                    <div style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 11, color: "#5a5448", marginTop: 6, letterSpacing: "0.05em" }}>
+                      {reading.freq.toFixed(2)} Hz · {reading.saptak}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 20, color: "#4a4438", fontStyle: "italic", letterSpacing: "0.05em" }}>
+                    {running ? "listening for sound…" : "system paused"}
+                  </div>
+                )}
+              </div>
+
+              {/* Classical Horizon Tuning Meter Gauge Bar Block */}
+              <div style={{ marginTop: 16 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontFamily: "'JetBrains Mono', monospace", fontSize: 10, color: "#5a5448", marginBottom: 6 }}>
+                  <span>−50¢ (Flat)</span>
+                  <span style={{ color: "#a8d8a8" }}>Kshana (0)</span>
+                  <span>+50¢ (Sharp)</span>
+                </div>
+                <div style={{ position: "relative", height: 44, background: "#0a0d14", borderRadius: 3, border: "1px solid #1c212d", overflow: "hidden" }}>
+                  <div style={{ position: "absolute", left: "50%", top: 0, bottom: 0, width: 1, background: "rgba(168,216,168,0.4)" }} />
+                  {[-30, -15, 15, 30].map((v) => (
+                    <div key={v} style={{ position: "absolute", left: `${50 + v * 1.6}%`, top: 6, bottom: 6, width: 1, background: "rgba(255,255,255,0.05)" }} />
+                  ))}
+                  {reading && (
+                    <div style={{
+                      position: "absolute",
+                      left: `${50 + needleAngle * 0.9}%`,
+                      top: 3, bottom: 3, width: 2.5,
+                      transform: "translateX(-50%)",
+                      background: inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080",
+                      boxShadow: inTune ? "0 0 12px #a8d8a8" : "none",
+                      transition: "left 70ms ease-out, background 150ms ease",
+                    }} />
+                  )}
+                </div>
+                <div style={{
+                  textAlign: "center",
+                  marginTop: 8,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 12,
+                  color: reading ? (inTune ? "#a8d8a8" : close ? "#e8d8a8" : "#d88080") : "#3a3428",
+                  minHeight: 16,
+                }}>
+                  {reading ? `${reading.cents > 0 ? "+" : ""}${reading.cents} Cents Deviation` : "—"}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Core Master Level Microphone Diagnostic Bar Monitor Strip */}
+          {running && (
+            <div style={{ marginTop: 14, paddingTop: 14, borderTop: "1px solid #1c212d" }}>
+              <div style={{ height: 3, background: "#080a0f", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%",
+                  width: `${Math.min(100, audioLevel * 450)}%`,
+                  background: audioLevel < 0.005 ? "#4a3333" : "#a8d8a8",
+                  transition: "width 80ms ease-out",
+                }} />
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Primary Master Functional Operation Control Interface Button Deck */}
+        <div style={{ marginTop: 20, display: "flex", justifyContent: "center", gap: 12, flexWrap: "wrap" }}>
+          {!running ? (
+            <button onClick={start} style={btnStyle("#4a5468", "#e8e6e1", true)}>Start Engine</button>
+          ) : (
+            <button onClick={stop} style={btnStyle("#6a4848", "#d88080")}>Stop Engine</button>
+          )}
+          <button
+            onClick={() => setShowSettings((s) => !s)}
+            style={btnStyle(showSettings ? "#a8d8a8" : "#2a3242", showSettings ? "#a8d8a8" : "#a8a498")}
+          >
+            {showSettings ? "Close Settings" : "Tonic Configuration"}
+          </button>
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 16, textAlign: "center", color: "#d88080", fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }}>
+            {error}
+          </div>
+        )}
+
+        {/* Configurable Indian Classical Settings Engine Control Drawer Board Container */}
+        {showSettings && (
+          <div style={{
+            marginTop: 16,
+            background: "#0f131c",
+            border: "1px solid #232936",
+            borderRadius: 6,
+            padding: "20px",
+            fontFamily: "'JetBrains Mono', monospace",
+            fontSize: 12,
+            color: "#a8a498",
+          }}>
+            
+            {/* Custom Interactive Indian Base Pitch Sa Tonic Controller Interface Selection Block */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={labelStyle}>Set Base Tonic Note (Sa Selection)</div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+                {WESTERN_NOTES.map((n) => (
+                  <button 
+                    key={n} 
+                    onClick={() => setSaNote(n)} 
+                    style={{ ...chipStyle(saNote === n), minWidth: 38, padding: "8px 4px" }}
+                  >
+                    {n}
+                  </button>
+                ))}
+              </div>
+              
+              <div style={labelStyle}>Tonic Register (Octave Range Anchor)</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                {[2, 3, 4, 5].map((oct) => (
+                  <button 
+                    key={oct} 
+                    onClick={() => setSaOctave(oct)} 
+                    style={{ ...chipStyle(saOctave === oct), padding: "6px 16px" }}
+                  >
+                    Octave {oct} {oct === 3 ? " (Male Mid)" : oct === 4 ? " (Female Mid)" : ""}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* A4 Master Global Calibration Reference Module System Block */}
+            <div style={{ borderTop: "1px solid #1f2533", paddingTop: 16 }}>
+              <div style={labelStyle}>Global A4 Reference Frequency Calibration · {a4} Hz</div>
+              <input type="range" min={420} max={450} step={1} value={a4} onChange={(e) => setA4(parseInt(e.target.value, 10))} style={{ width: "100%" }} />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#5a5448", marginTop: 4 }}>
+                <span>420 Hz</span><span>440 Hz (Standard)</span><span>450 Hz</span>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Lower Editorial Instructions Footer Frame Box block */}
+        <div style={{
+          marginTop: 24,
+          textAlign: "center",
+          fontSize: 11,
+          color: "#4e493e",
+          letterSpacing: "0.08em",
+          lineHeight: 1.6,
+          fontFamily: "'JetBrains Mono', monospace",
+        }}>
+          Sing steady individual tones · Calibrated explicitly for vocal practice<br />
+          Saptak indicators: ( ̣) Mandra / lower · (̇) Tar / upper register
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
